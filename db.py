@@ -12,9 +12,9 @@ class Database:
         await self.connection.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 telegram_id INTEGER PRIMARY KEY,
-                first_name TEXT,
+                first_name TEXT NOT NULL,
                 last_name TEXT,
-                username TEXT,
+                username TEXT UNIQE NOT NULL,
                 language TEXT,
                 is_active BOOL DEFAULT True,
                 is_super BOOL DEFAULT False
