@@ -2,7 +2,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram import types
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, BotCommand
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 from PIL import Image, ImageDraw, ImageFont
@@ -10,6 +10,7 @@ import asyncio
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from db import init_db, add_user, get_user_by_telegram_id
 
 load_dotenv()
 
@@ -27,6 +28,8 @@ dp = Dispatcher()
 TOTAL_TIME = 120  # Наприклад, 120 секунд, відлік кожні 10сек, але оцінка підраховується кожну секунду
 QUESTION = "Який це колір #FFFFFF ?"
 CORRECT_ANSWER = 2  # Правильна відповідь (друга), максимальна оцінка 100 балів
+ROW = 4  # 4 варіанти на рядок
+
 
 # Словник для збереження інформації про користувачів (їх таймери)
 user_data = {}
@@ -58,7 +61,7 @@ def get_vote_keyboard():
     builder.button(text="White", callback_data="vote_option_2")
     builder.button(text="Blue", callback_data="vote_option_3")
     builder.button(text="Red", callback_data="vote_option_4")
-    builder.adjust(4)  # 4 варіанти на рядок
+    builder.adjust(ROW)
     return builder.as_markup()
 
 
@@ -70,9 +73,26 @@ def calculate_score(elapsed_time: int, total_time: int) -> int:
 # Стартова команда з таймером
 @dp.message(Command('start'))
 async def start_poll(message: types.Message):
-    user_first_name = message.from_user.first_name  # Отримуємо ім'я користувача
-    # Вітання
-    await message.answer(f"Вітаю, {user_first_name}!")
+    # Отримуємо дані користувача з Телеграма
+    telegram_id = message.from_user.id
+    first_name = message.from_user.first_name
+    last_name = message.from_user.last_name or ''  # Може бути None
+    username = message.from_user.username or ''  # Може бути None
+    language = message.from_user.language_code or ''  # Може бути None
+
+    # Ініціалізуємо базу даних (якщо ще не створено таблицю)
+    await init_db()
+
+    # Перевіряємо, чи є користувач у базі
+    user = await get_user_by_telegram_id(telegram_id)
+
+    if user is None:
+        # Якщо користувача немає, додаємо його в базу
+        await add_user(telegram_id, first_name, last_name, username, language)
+        await message.answer(f"Вітаю, {first_name}!")
+    else:
+        # Якщо користувач уже є в базі
+        await message.answer(f"Привіт, {first_name}! Радий бачити вас знову.")
 
     # Створюємо зображення з питанням
     img_path = create_question_image(QUESTION)
@@ -80,7 +100,7 @@ async def start_poll(message: types.Message):
     # Відправляємо зображення з варіантами відповідей
     try:
         photo = FSInputFile(img_path)
-        await message.answer_photo(photo=photo, caption=f"{user_first_name}, будь ласка, оберіть відповідь:",
+        await message.answer_photo(photo=photo, caption=f"{first_name}, будь ласка, оберіть відповідь:",
                                    reply_markup=get_vote_keyboard())
     except TelegramBadRequest as e:
         logging.error(f"Помилка відправки зображення: {e}")
@@ -92,7 +112,8 @@ async def start_poll(message: types.Message):
     end_time = start_time + timedelta(seconds=TOTAL_TIME)
 
     # Зберігаємо інформацію про користувача і таймер
-    user_data[message.from_user.id] = {'start_time': start_time, 'end_time': end_time, 'answered': False}
+    user_data[message.from_user.id] = {'start_time': start_time, 'end_time': end_time, 'answered': False,
+                                       'time_message': None}
 
     await message.answer(f"Зворотній відлік розпочато! У вас є {TOTAL_TIME} секунд.")
 
@@ -104,17 +125,32 @@ async def start_poll(message: types.Message):
         elapsed_time = (datetime.now() - start_time).seconds
         remaining_time = TOTAL_TIME - elapsed_time
 
-        # Надсилаємо повідомлення кожні 10 секунд
+        # Якщо залишився час і минуло 10 секунд
         if remaining_time % 10 == 0:
             score = calculate_score(elapsed_time, TOTAL_TIME)
-            await message.answer(f"Залишилось часу: {remaining_time} секунд.")  #  Оцінка: {score}
+
+            # Видаляємо попереднє повідомлення, якщо воно існує
+            if user_data[message.from_user.id]['time_message'] is not None:
+                try:
+                    await user_data[message.from_user.id]['time_message'].delete()
+                except TelegramBadRequest:
+                    pass
+
+            # Надсилаємо нове повідомлення і зберігаємо його ID
+            time_message = await message.answer(f"Залишилось часу: {remaining_time} секунд. Оцінка: {score}")
+            user_data[message.from_user.id]['time_message'] = time_message
 
         await asyncio.sleep(1)  # Оновлюємо щосекунди
 
     if not user_data[message.from_user.id]['answered']:
         # Коли час завершився, якщо не було відповіді
-        await message.answer(f"{user_first_name}, час вийшов! Оцінка 0.")
-
+        await message.answer("Час вийшов! Оцінка 0.")
+        # Видаляємо останнє повідомлення про час, якщо воно є
+        if user_data[message.from_user.id]['time_message'] is not None:
+            try:
+                await user_data[message.from_user.id]['time_message'].delete()
+            except TelegramBadRequest:
+                pass
 
 # Обробка вибору варіантів відповіді
 @dp.callback_query(lambda c: c.data.startswith('vote_option_'))
@@ -148,8 +184,21 @@ async def process_vote(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
 
 
+# Функція для додавання команд у меню
+async def set_commands(bot: Bot):
+    commands = [
+        BotCommand(command="/start", description="Почати опитування"),
+        # Додавайте інші команди тут, якщо потрібно
+    ]
+    await bot.set_my_commands(commands)
+
+
 # Запуск бота
 async def main():
+    # Встановлюємо команди меню
+    await set_commands(bot)
+
+    # Запускаємо polling
     await dp.start_polling(bot)
 
 
