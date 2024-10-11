@@ -10,7 +10,7 @@ import asyncio
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from db import init_db, add_user, get_user_by_telegram_id
+from db import Database
 
 load_dotenv()
 
@@ -30,6 +30,8 @@ QUESTION = "Який це колір #FFFFFF ?"
 CORRECT_ANSWER = 2  # Правильна відповідь (друга), максимальна оцінка 100 балів
 ROW = 4  # 4 варіанти на рядок
 
+# Створюємо об'єкт для роботи з БД
+db = Database()
 
 # Словник для збереження інформації про користувачів (їх таймери)
 user_data = {}
@@ -80,15 +82,12 @@ async def start_poll(message: types.Message):
     username = message.from_user.username or ''  # Може бути None
     language = message.from_user.language_code or ''  # Може бути None
 
-    # Ініціалізуємо базу даних (якщо ще не створено таблицю)
-    await init_db()
-
     # Перевіряємо, чи є користувач у базі
-    user = await get_user_by_telegram_id(telegram_id)
+    user = await db.get_user_by_telegram_id(telegram_id)
 
     if user is None:
         # Якщо користувача немає, додаємо його в базу
-        await add_user(telegram_id, first_name, last_name, username, language)
+        await db.add_user(telegram_id, first_name, last_name, username, language)
         await message.answer(f"Вітаю, {first_name}!")
     else:
         # Якщо користувач уже є в базі
@@ -193,13 +192,28 @@ async def set_commands(bot: Bot):
     await bot.set_my_commands(commands)
 
 
+async def on_startup():
+    # Відкриваємо сесію при старті бота
+    await db.connect()
+
+
+async def on_shutdown():
+    # Закриваємо сесію при зупинці бота
+    await db.disconnect()
+
+
 # Запуск бота
 async def main():
     # Встановлюємо команди меню
     await set_commands(bot)
 
-    # Запускаємо polling
-    await dp.start_polling(bot)
+    await on_startup()  # Відкриття сесії БД при запуску
+    print("DB started")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await on_shutdown()  # Закриття сесії БД при завершенні роботи
+        print("DB closed")
 
 
 if __name__ == '__main__':
